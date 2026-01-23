@@ -25,6 +25,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/iterator"
 )
@@ -42,6 +44,101 @@ var (
 	maxFileSize      int64 // Maximum file size in bytes (0 = no limit)
 	processedObjects   map[string]bool
 	processedObjectsMu sync.RWMutex
+)
+
+var (
+	syncRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wonderful_rag_sync_runs_total",
+			Help: "Total number of sync runs.",
+		},
+		[]string{"provider"},
+	)
+	syncErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wonderful_rag_sync_errors_total",
+			Help: "Total number of sync errors not tied to a specific file.",
+		},
+		[]string{"provider"},
+	)
+	filesProcessedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wonderful_rag_files_processed_total",
+			Help: "Total number of files processed successfully.",
+		},
+		[]string{"provider"},
+	)
+	filesFailedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wonderful_rag_files_failed_total",
+			Help: "Total number of files that failed to process.",
+		},
+		[]string{"provider"},
+	)
+	filesSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wonderful_rag_files_skipped_total",
+			Help: "Total number of files skipped (archived or too large).",
+		},
+		[]string{"provider"},
+	)
+	syncDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "wonderful_rag_sync_duration_seconds",
+			Help:    "Duration of sync runs in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"provider"},
+	)
+	syncInProgress = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_sync_in_progress",
+			Help: "Whether a sync is currently in progress (1/0).",
+		},
+		[]string{"provider"},
+	)
+	lastSyncTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_timestamp",
+			Help: "Unix timestamp of the last completed sync.",
+		},
+		[]string{"provider"},
+	)
+	lastSyncSuccess = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_success",
+			Help: "Whether the last sync completed without errors (1/0).",
+		},
+		[]string{"provider"},
+	)
+	lastSyncFilesFound = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_files_found",
+			Help: "Number of files found in the last sync.",
+		},
+		[]string{"provider"},
+	)
+	lastSyncFilesProcessed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_files_processed",
+			Help: "Number of files processed in the last sync.",
+		},
+		[]string{"provider"},
+	)
+	lastSyncFilesFailed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_files_failed",
+			Help: "Number of files failed in the last sync.",
+		},
+		[]string{"provider"},
+	)
+	lastSyncFilesSkipped = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wonderful_rag_last_sync_files_skipped",
+			Help: "Number of files skipped in the last sync.",
+		},
+		[]string{"provider"},
+	)
 )
 
 type ObjectInfo struct {
@@ -269,6 +366,22 @@ func init() {
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.DebugLevel) // Verbose logging
 	processedObjects = make(map[string]bool)
+
+	prometheus.MustRegister(
+		syncRunsTotal,
+		syncErrorsTotal,
+		filesProcessedTotal,
+		filesFailedTotal,
+		filesSkippedTotal,
+		syncDurationSeconds,
+		syncInProgress,
+		lastSyncTimestamp,
+		lastSyncSuccess,
+		lastSyncFilesFound,
+		lastSyncFilesProcessed,
+		lastSyncFilesFailed,
+		lastSyncFilesSkipped,
+	)
 }
 
 func main() {
@@ -573,12 +686,20 @@ func buildArchiveKey(archivePrefix, relative string) string {
 	return strings.TrimSuffix(archivePrefix, "/") + "/" + relative
 }
 
+func boolToFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func setupRouter() *gin.Engine {
 	router := gin.Default()
 	router.Use(gin.Logger(), gin.Recovery())
 
 	// Health check
 	router.GET("/health", healthHandler)
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// API routes
 	api := router.Group("/api/v1")
@@ -641,6 +762,10 @@ func getProcessedFiles(c *gin.Context) {
 func syncStorageToWonderful() {
 	logger.Info("=== Starting Storage to Wonderful API Sync ===")
 	syncStartTime := time.Now()
+	providerLabel := storageProvider
+	syncRunsTotal.WithLabelValues(providerLabel).Inc()
+	syncInProgress.WithLabelValues(providerLabel).Set(1)
+	defer syncInProgress.WithLabelValues(providerLabel).Set(0)
 
 	ctx := context.Background()
 	logger.Debugf("Preparing to list objects from %s (%s)", storageProvider, storageLocation)
@@ -648,6 +773,7 @@ func syncStorageToWonderful() {
 	objects, err := storageClient.ListObjects(ctx)
 	if err != nil {
 		logger.Errorf("✗ Error listing objects: %v", err)
+		syncErrorsTotal.WithLabelValues(providerLabel).Inc()
 		return
 	}
 
@@ -665,6 +791,7 @@ func syncStorageToWonderful() {
 		key := obj.Key
 		if isInArchive(key, processedPrefix) || isInArchive(key, errorPrefix) {
 			logger.Debugf("Skipping archived file: %s", key)
+			filesSkippedTotal.WithLabelValues(providerLabel).Inc()
 			continue
 		}
 		size := obj.Size
@@ -680,6 +807,7 @@ func syncStorageToWonderful() {
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: file too large (%s > %s)", key, sizeStr, formatFileSize(maxFileSize)))
 			skippedCount++
+			filesSkippedTotal.WithLabelValues(providerLabel).Inc()
 			continue
 		}
 
@@ -695,6 +823,7 @@ func syncStorageToWonderful() {
 			logger.Errorf("  ✗ Failed to download %s: %v", key, err)
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: download failed - %v", key, err))
+			filesFailedTotal.WithLabelValues(providerLabel).Inc()
 			continue
 		}
 		logger.Debugf("  ✓ Downloaded %d bytes in %v", len(fileContent), downloadDuration)
@@ -718,9 +847,11 @@ func syncStorageToWonderful() {
 			logger.Errorf("  ✗ Failed to process %s (upload or attach failed): %v", key, err)
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: processing failed - %v", key, err))
+			filesFailedTotal.WithLabelValues(providerLabel).Inc()
 			archiveKey := buildArchiveKey(errorPrefix, relativeKey(key, storagePrefix))
 			if moveErr := storageClient.MoveObject(ctx, key, archiveKey); moveErr != nil {
 				logger.Warnf("  ⚠ Failed to move %s to error folder: %v", key, moveErr)
+				syncErrorsTotal.WithLabelValues(providerLabel).Inc()
 			} else {
 				logger.Infof("  ↪ Moved failed file to %s", archiveKey)
 			}
@@ -731,6 +862,7 @@ func syncStorageToWonderful() {
 		archiveKey := buildArchiveKey(processedPrefix, relativeKey(key, storagePrefix))
 		if moveErr := storageClient.MoveObject(ctx, key, archiveKey); moveErr != nil {
 			logger.Warnf("  ⚠ Failed to move %s to processed folder: %v", key, moveErr)
+			syncErrorsTotal.WithLabelValues(providerLabel).Inc()
 		} else {
 			logger.Infof("  ↪ Moved processed file to %s", archiveKey)
 		}
@@ -740,9 +872,17 @@ func syncStorageToWonderful() {
 
 		logger.Infof("  ✓ Successfully processed %s (uploaded and attached to RAG, file ID: %s, took %v)", key, fileID, uploadDuration)
 		successCount++
+		filesProcessedTotal.WithLabelValues(providerLabel).Inc()
 	}
 
 	syncDuration := time.Since(syncStartTime)
+	syncDurationSeconds.WithLabelValues(providerLabel).Observe(syncDuration.Seconds())
+	lastSyncTimestamp.WithLabelValues(providerLabel).Set(float64(time.Now().Unix()))
+	lastSyncSuccess.WithLabelValues(providerLabel).Set(boolToFloat(errorCount == 0))
+	lastSyncFilesFound.WithLabelValues(providerLabel).Set(float64(totalFilesFound))
+	lastSyncFilesProcessed.WithLabelValues(providerLabel).Set(float64(successCount))
+	lastSyncFilesFailed.WithLabelValues(providerLabel).Set(float64(errorCount))
+	lastSyncFilesSkipped.WithLabelValues(providerLabel).Set(float64(skippedCount))
 	logger.Info("=== Sync Completed ===")
 	logger.Infof("Summary:")
 	logger.Infof("  Total files found: %d", totalFilesFound)

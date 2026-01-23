@@ -133,6 +133,26 @@ kubectl apply -f deploy/k8s/secrets.yaml
 GET /health
 ```
 
+### Prometheus Metrics
+```
+GET /metrics
+```
+
+Custom metrics include:
+- `wonderful_rag_sync_runs_total`
+- `wonderful_rag_sync_errors_total`
+- `wonderful_rag_files_processed_total`
+- `wonderful_rag_files_failed_total`
+- `wonderful_rag_files_skipped_total`
+- `wonderful_rag_sync_duration_seconds`
+- `wonderful_rag_sync_in_progress`
+- `wonderful_rag_last_sync_timestamp`
+- `wonderful_rag_last_sync_success`
+- `wonderful_rag_last_sync_files_found`
+- `wonderful_rag_last_sync_files_processed`
+- `wonderful_rag_last_sync_files_failed`
+- `wonderful_rag_last_sync_files_skipped`
+
 ### Trigger Manual Sync
 ```
 POST /api/v1/sync
