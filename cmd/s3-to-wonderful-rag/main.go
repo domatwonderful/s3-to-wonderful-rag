@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -44,6 +45,8 @@ var (
 	maxFileSize      int64 // Maximum file size in bytes (0 = no limit)
 	processedObjects   map[string]bool
 	processedObjectsMu sync.RWMutex
+
+	httpClient *http.Client
 )
 
 var (
@@ -366,6 +369,20 @@ func init() {
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.DebugLevel) // Verbose logging
 	processedObjects = make(map[string]bool)
+	rand.Seed(time.Now().UnixNano())
+
+	httpClient = &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
 
 	prometheus.MustRegister(
 		syncRunsTotal,
@@ -693,6 +710,48 @@ func boolToFloat(value bool) float64 {
 	return 0
 }
 
+func newTraceID() string {
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63())
+}
+
+func doRequestWithRetry(req *http.Request, maxAttempts int, retryableStatus func(int) bool, label string) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err = httpClient.Do(req)
+		if err == nil && resp != nil && !retryableStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if attempt == maxAttempts {
+			break
+		}
+		sleepWithJitter(attempt)
+	}
+	if err == nil && resp != nil {
+		return resp, nil
+	}
+	return nil, fmt.Errorf("%s failed after %d attempts: %w", label, maxAttempts, err)
+}
+
+func isRetryableStatus(status int) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if status >= 500 && status <= 599 {
+		return true
+	}
+	return false
+}
+
+func sleepWithJitter(attempt int) {
+	backoff := time.Duration(200*attempt) * time.Millisecond
+	jitter := time.Duration(rand.Int63n(200)) * time.Millisecond
+	time.Sleep(backoff + jitter)
+}
+
 func setupRouter() *gin.Engine {
 	router := gin.Default()
 	router.Use(gin.Logger(), gin.Recovery())
@@ -840,7 +899,7 @@ func syncStorageToWonderful() {
 		// uploadToWonderful performs both:
 		// 1. Upload request (get pre-signed URL and upload to S3)
 		// 2. Attach request (attach uploaded file to RAG)
-		fileID, err := uploadToWonderful(fileName, fileContent, key)
+		fileID, err := uploadToWonderful(ctx, fileName, fileContent, key)
 		uploadDuration := time.Since(uploadStart)
 
 		if err != nil {
@@ -899,13 +958,10 @@ func syncStorageToWonderful() {
 	}
 }
 
-func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (string, error) {
+func uploadToWonderful(ctx context.Context, fileName string, fileContent []byte, s3Key string) (string, error) {
 	logger.Debugf("    Preparing upload to Wonderful API...")
 	logger.Debugf("    File name: %s, Size: %d bytes", fileName, len(fileContent))
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	traceID := newTraceID()
 
 	// Step 1: Get pre-signed S3 URL from Wonderful API
 	storageURL := fmt.Sprintf("%s/api/v1/storage", wonderfulAPIURL)
@@ -940,7 +996,9 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 	logger.Debugf("    ✓ Storage request payload: %s", string(storageBody))
 
 	// Try POST method first (as per API spec)
-	req, err := http.NewRequest("POST", storageURL, bytes.NewBuffer(storageBody))
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "POST", storageURL, bytes.NewBuffer(storageBody))
 	if err != nil {
 		logger.Errorf("    ✗ Failed to create storage request: %v", err)
 		return "", fmt.Errorf("failed to create storage request: %w", err)
@@ -949,8 +1007,10 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 	req.Header.Set("x-api-key", wonderfulAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "s3-to-wonderful-rag-sync/1.0")
+	req.Header.Set("X-Request-Id", traceID)
 
-	resp, err := client.Do(req)
+	resp, err := doRequestWithRetry(req, 3, isRetryableStatus, "storage request")
 	if err != nil {
 		logger.Errorf("    ✗ Storage request failed: %v", err)
 		return "", fmt.Errorf("failed to get pre-signed URL: %w", err)
@@ -1005,7 +1065,9 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 	// Step 2: Upload file directly to S3 using pre-signed URL
 	logger.Infof("    Step 2: Uploading file to S3 using pre-signed URL...")
 
-	uploadReq, err := http.NewRequest("PUT", presignedURL, bytes.NewReader(fileContent))
+	uploadCtx, uploadCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer uploadCancel()
+	uploadReq, err := http.NewRequestWithContext(uploadCtx, "PUT", presignedURL, bytes.NewReader(fileContent))
 	if err != nil {
 		logger.Errorf("    ✗ Failed to create S3 upload request: %v", err)
 		return "", fmt.Errorf("failed to create S3 upload request: %w", err)
@@ -1019,7 +1081,7 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 	uploadReq.Header.Set("Content-Type", uploadContentType)
 	logger.Debugf("    ✓ Using Content-Type for S3 upload: %s", uploadContentType)
 
-	uploadResp, err := http.DefaultClient.Do(uploadReq)
+	uploadResp, err := doRequestWithRetry(uploadReq, 2, isRetryableStatus, "S3 upload")
 	if err != nil {
 		logger.Errorf("    ✗ S3 upload failed: %v", err)
 		return "", fmt.Errorf("failed to upload to S3: %w", err)
@@ -1061,7 +1123,9 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 	logger.Debugf("    ✓ JSON request body: %s", string(jsonBody))
 
 	// Create attachment request
-	attachReq, err := http.NewRequest("POST", attachURL, bytes.NewBuffer(jsonBody))
+	attachCtx, attachCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer attachCancel()
+	attachReq, err := http.NewRequestWithContext(attachCtx, "POST", attachURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		logger.Errorf("    ✗ Failed to create attachment request: %v", err)
 		return "", fmt.Errorf("failed to create attachment request: %w", err)
@@ -1069,10 +1133,12 @@ func uploadToWonderful(fileName string, fileContent []byte, s3Key string) (strin
 
 	attachReq.Header.Set("Content-Type", "application/json")
 	attachReq.Header.Set("x-api-key", wonderfulAPIKey)
+	attachReq.Header.Set("User-Agent", "s3-to-wonderful-rag-sync/1.0")
+	attachReq.Header.Set("X-Request-Id", traceID)
 	logger.Debugf("    ✓ Attachment request created with Content-Type: application/json")
 
 	// Execute attachment request
-	attachResp, err := client.Do(attachReq)
+	attachResp, err := doRequestWithRetry(attachReq, 3, isRetryableStatus, "attach request")
 	if err != nil {
 		logger.Errorf("    ✗ Attachment request failed: %v", err)
 		return "", fmt.Errorf("failed to execute attachment request: %w", err)
