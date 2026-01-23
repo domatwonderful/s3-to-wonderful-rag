@@ -248,6 +248,22 @@ For manual builds:
 docker build -f build/docker/Dockerfile -t ghcr.io/domatwonderful/s3-to-wonderful-rag:latest .
 ```
 
+### Running Locally with `container` (macOS)
+
+Build and run using Apple's native container CLI:
+```bash
+container system start
+container builder start
+container build -f build/docker/Dockerfile -t s3-to-wonderful-rag:local .
+container run --rm -d --name s3-to-wonderful-rag-local --env-file .env -p 8080:8080 s3-to-wonderful-rag:local
+```
+
+Check logs and stop:
+```bash
+container logs -n 200 s3-to-wonderful-rag-local
+container stop s3-to-wonderful-rag-local
+```
+
 ## Security Best Practices
 
 1. **Secrets Management**: Use Kubernetes secrets or External Secrets Operator
