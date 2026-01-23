@@ -14,18 +14,33 @@ spec:
       labels:
         {{- include "s3-to-wonderful-rag.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      serviceAccountName: {{ include "s3-to-wonderful-rag.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
       {{- end }}
       containers:
         - name: s3-to-wonderful-rag
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: >-
+            {{- if .Values.image.digest -}}
+            {{ .Values.image.repository }}@{{ .Values.image.digest }}
+            {{- else -}}
+            {{ .Values.image.repository }}:{{ .Values.image.tag }}
+            {{- end -}}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
+          {{- if .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+          {{- end }}
           env:
             - name: STORAGE_PROVIDER
               valueFrom:
@@ -163,3 +178,7 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+      {{- if .Values.extraVolumes }}
+      volumes:
+        {{- toYaml .Values.extraVolumes | nindent 8 }}
+      {{- end }}

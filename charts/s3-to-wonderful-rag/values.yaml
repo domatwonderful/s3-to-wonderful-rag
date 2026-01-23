@@ -3,6 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/domatwonderful/s3-to-wonderful-rag
   tag: latest
+  digest: ""
   pullPolicy: Always
 
 imagePullSecrets: []
@@ -22,6 +23,49 @@ resources:
 
 nameOverride: ""
 fullnameOverride: ""
+
+automountServiceAccountToken: false
+
+serviceAccount:
+  create: true
+  name: ""
+
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+networkPolicy:
+  enabled: true
+  allowDns: true
+  allowHttpsEgress: true
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+extraVolumes:
+  - name: tmp
+    emptyDir: {}
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
 
 env:
   storageProvider: s3

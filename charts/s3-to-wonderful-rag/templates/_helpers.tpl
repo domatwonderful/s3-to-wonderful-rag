@@ -30,3 +30,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-secrets" (include "s3-to-wonderful-rag.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "s3-to-wonderful-rag.serviceAccountName" -}}
+{{- if .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else -}}
+{{- include "s3-to-wonderful-rag.fullname" . -}}
+{{- end -}}
+{{- end -}}

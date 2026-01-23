@@ -15,6 +15,14 @@ spec:
       labels:
         app: wonderful-rag
     spec:
+      serviceAccountName: wonderful-rag
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       # Uncomment if using a private image registry
       # imagePullSecrets:
       #   - name: ghcr-secret
@@ -22,10 +30,19 @@ spec:
       - name: wonderful-rag
         image: ghcr.io/domatwonderful/s3-to-wonderful-rag:latest
         imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
         ports:
         - containerPort: 8080
           name: http
           protocol: TCP
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         env:
         - name: STORAGE_PROVIDER
           valueFrom:
@@ -168,6 +185,9 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
+      volumes:
+      - name: tmp
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
