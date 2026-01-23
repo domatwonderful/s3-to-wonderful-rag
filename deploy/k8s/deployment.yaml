@@ -1,0 +1,187 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wonderful-rag
+  namespace: wonderful-rag
+  labels:
+    app: wonderful-rag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wonderful-rag
+  template:
+    metadata:
+      labels:
+        app: wonderful-rag
+    spec:
+      # Uncomment if using a private image registry
+      # imagePullSecrets:
+      #   - name: ghcr-secret
+      containers:
+      - name: wonderful-rag
+        image: ghcr.io/domatwonderful/s3-to-wonderful-rag:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: STORAGE_PROVIDER
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: storage_provider
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: aws_region
+        - name: S3_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: s3_bucket
+        - name: S3_PREFIX
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: s3_prefix
+              optional: true
+        - name: GCS_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: gcs_bucket
+              optional: true
+        - name: GCS_PREFIX
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: gcs_prefix
+              optional: true
+        - name: AZURE_STORAGE_ACCOUNT
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: azure_storage_account
+              optional: true
+        - name: AZURE_STORAGE_CONTAINER
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: azure_storage_container
+              optional: true
+        - name: AZURE_STORAGE_PREFIX
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: azure_storage_prefix
+              optional: true
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: aws_access_key_id
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: aws_secret_access_key
+              optional: true
+        - name: AZURE_STORAGE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: azure_storage_key
+              optional: true
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: azure_storage_connection_string
+              optional: true
+        - name: WONDERFUL_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: wonderful_api_url
+        - name: WONDERFUL_RAG_ID
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: wonderful_rag_id
+        - name: WONDERFUL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wonderful-rag-secrets
+              key: wonderful_api_key
+        - name: SYNC_INTERVAL_SECONDS
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: sync_interval_seconds
+              optional: true
+        - name: SYNC_INTERVAL_MINUTES
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: sync_interval_minutes
+              optional: true
+        - name: MAX_FILE_SIZE_MB
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: max_file_size_mb
+              optional: true
+        - name: PORT
+          value: "8080"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wonderful-rag
+  namespace: wonderful-rag
+  labels:
+    app: wonderful-rag
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: wonderful-rag
