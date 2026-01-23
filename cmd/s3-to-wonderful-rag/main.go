@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -38,8 +40,8 @@ var (
 	wonderfulAPIKey  string
 	syncInterval     time.Duration
 	maxFileSize      int64 // Maximum file size in bytes (0 = no limit)
-	processedFiles   map[string]bool
-	processedFilesMu sync.RWMutex
+	processedObjects   map[string]bool
+	processedObjectsMu sync.RWMutex
 )
 
 type ObjectInfo struct {
@@ -52,6 +54,7 @@ type StorageClient interface {
 	Provider() string
 	ListObjects(ctx context.Context) ([]ObjectInfo, error)
 	DownloadObject(ctx context.Context, key string) ([]byte, error)
+	MoveObject(ctx context.Context, srcKey, destKey string) error
 	Location() string
 	Prefix() string
 }
@@ -111,6 +114,25 @@ func (s *S3Storage) DownloadObject(ctx context.Context, key string) ([]byte, err
 	return buf.Bytes(), nil
 }
 
+func (s *S3Storage) MoveObject(ctx context.Context, srcKey, destKey string) error {
+	if srcKey == destKey {
+		return nil
+	}
+	_, err := s.client.CopyObjectWithContext(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(s.bucket),
+		Key:        aws.String(destKey),
+		CopySource: aws.String(url.PathEscape(s.bucket + "/" + srcKey)),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.client.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(srcKey),
+	})
+	return err
+}
+
 type GCSStorage struct {
 	bucket string
 	prefix string
@@ -153,6 +175,18 @@ func (g *GCSStorage) DownloadObject(ctx context.Context, key string) ([]byte, er
 	}
 	defer reader.Close()
 	return io.ReadAll(reader)
+}
+
+func (g *GCSStorage) MoveObject(ctx context.Context, srcKey, destKey string) error {
+	if srcKey == destKey {
+		return nil
+	}
+	bucket := g.client.Bucket(g.bucket)
+	copier := bucket.Object(destKey).CopierFrom(bucket.Object(srcKey))
+	if _, err := copier.Run(ctx); err != nil {
+		return err
+	}
+	return bucket.Object(srcKey).Delete(ctx)
 }
 
 type AzureStorage struct {
@@ -210,11 +244,31 @@ func (a *AzureStorage) DownloadObject(ctx context.Context, key string) ([]byte, 
 	return io.ReadAll(resp.Body)
 }
 
+func (a *AzureStorage) MoveObject(ctx context.Context, srcKey, destKey string) error {
+	if srcKey == destKey {
+		return nil
+	}
+	data, err := a.DownloadObject(ctx, srcKey)
+	if err != nil {
+		return err
+	}
+	_, err = a.client.UploadBuffer(ctx, a.container, destKey, data, &azblob.UploadBufferOptions{
+		HTTPHeaders: &blob.HTTPHeaders{
+			BlobContentType: to.Ptr("application/octet-stream"),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = a.client.DeleteBlob(ctx, a.container, srcKey, nil)
+	return err
+}
+
 func init() {
 	logger = logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.DebugLevel) // Verbose logging
-	processedFiles = make(map[string]bool)
+	processedObjects = make(map[string]bool)
 }
 
 func main() {
@@ -491,6 +545,34 @@ func maskCredential(value string) string {
 	return ""
 }
 
+func archivePrefixes(prefix string) (string, string) {
+	base := strings.Trim(prefix, "/")
+	if base == "" {
+		return "processed", "error"
+	}
+	return base + "/processed", base + "/error"
+}
+
+func isInArchive(key, archivePrefix string) bool {
+	return key == archivePrefix || strings.HasPrefix(key, archivePrefix+"/")
+}
+
+func relativeKey(key, prefix string) string {
+	base := strings.Trim(prefix, "/")
+	if base == "" {
+		return key
+	}
+	prefixWithSlash := base + "/"
+	if strings.HasPrefix(key, prefixWithSlash) {
+		return strings.TrimPrefix(key, prefixWithSlash)
+	}
+	return key
+}
+
+func buildArchiveKey(archivePrefix, relative string) string {
+	return strings.TrimSuffix(archivePrefix, "/") + "/" + relative
+}
+
 func setupRouter() *gin.Engine {
 	router := gin.Default()
 	router.Use(gin.Logger(), gin.Recovery())
@@ -529,9 +611,9 @@ func triggerSync(c *gin.Context) {
 }
 
 func getStats(c *gin.Context) {
-	processedFilesMu.RLock()
-	count := len(processedFiles)
-	processedFilesMu.RUnlock()
+	processedObjectsMu.RLock()
+	count := len(processedObjects)
+	processedObjectsMu.RUnlock()
 
 	c.JSON(http.StatusOK, gin.H{
 		"processed_files":       count,
@@ -543,12 +625,12 @@ func getStats(c *gin.Context) {
 }
 
 func getProcessedFiles(c *gin.Context) {
-	processedFilesMu.RLock()
-	files := make([]string, 0, len(processedFiles))
-	for file := range processedFiles {
+	processedObjectsMu.RLock()
+	files := make([]string, 0, len(processedObjects))
+	for file := range processedObjects {
 		files = append(files, file)
 	}
-	processedFilesMu.RUnlock()
+	processedObjectsMu.RUnlock()
 
 	c.JSON(http.StatusOK, gin.H{
 		"files": files,
@@ -574,11 +656,17 @@ func syncStorageToWonderful() {
 	skippedCount := 0
 	totalFilesFound := 0
 	errors := []string{}
+	processedPrefix, errorPrefix := archivePrefixes(storagePrefix)
+	logger.Infof("Archive prefixes - processed: %s, error: %s", processedPrefix, errorPrefix)
 
 	logger.Infof("Scanning %s for files...", storageProvider)
 
 	for _, obj := range objects {
 		key := obj.Key
+		if isInArchive(key, processedPrefix) || isInArchive(key, errorPrefix) {
+			logger.Debugf("Skipping archived file: %s", key)
+			continue
+		}
 		size := obj.Size
 		totalFilesFound++
 
@@ -586,25 +674,12 @@ func syncStorageToWonderful() {
 		sizeStr := formatFileSize(size)
 		logger.Debugf("Found file: %s (size: %s, modified: %v)", key, sizeStr, obj.LastModified)
 
-		// Skip if already processed
-		processedFilesMu.RLock()
-		if processedFiles[key] {
-			processedFilesMu.RUnlock()
-			logger.Debugf("⏭️  Skipping already processed file: %s", key)
-			skippedCount++
-			continue
-		}
-		processedFilesMu.RUnlock()
-
 		// Check file size limit
 		if maxFileSize > 0 && size > maxFileSize {
 			logger.Warnf("⚠️  Skipping file %s: size %s exceeds maximum allowed size %s", key, sizeStr, formatFileSize(maxFileSize))
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: file too large (%s > %s)", key, sizeStr, formatFileSize(maxFileSize)))
-			// Mark as processed to avoid retrying
-			processedFilesMu.Lock()
-			processedFiles[key] = true
-			processedFilesMu.Unlock()
+			skippedCount++
 			continue
 		}
 
@@ -643,14 +718,25 @@ func syncStorageToWonderful() {
 			logger.Errorf("  ✗ Failed to process %s (upload or attach failed): %v", key, err)
 			errorCount++
 			errors = append(errors, fmt.Sprintf("%s: processing failed - %v", key, err))
-			// Do NOT mark as processed if upload or attach failed
+			archiveKey := buildArchiveKey(errorPrefix, relativeKey(key, storagePrefix))
+			if moveErr := storageClient.MoveObject(ctx, key, archiveKey); moveErr != nil {
+				logger.Warnf("  ⚠ Failed to move %s to error folder: %v", key, moveErr)
+			} else {
+				logger.Infof("  ↪ Moved failed file to %s", archiveKey)
+			}
 			continue
 		}
 
-		// Only mark as processed after BOTH upload and attach succeeded
-		processedFilesMu.Lock()
-		processedFiles[key] = true
-		processedFilesMu.Unlock()
+		// Only move after BOTH upload and attach succeeded
+		archiveKey := buildArchiveKey(processedPrefix, relativeKey(key, storagePrefix))
+		if moveErr := storageClient.MoveObject(ctx, key, archiveKey); moveErr != nil {
+			logger.Warnf("  ⚠ Failed to move %s to processed folder: %v", key, moveErr)
+		} else {
+			logger.Infof("  ↪ Moved processed file to %s", archiveKey)
+		}
+		processedObjectsMu.Lock()
+		processedObjects[key] = true
+		processedObjectsMu.Unlock()
 
 		logger.Infof("  ✓ Successfully processed %s (uploaded and attached to RAG, file ID: %s, took %v)", key, fileID, uploadDuration)
 		successCount++

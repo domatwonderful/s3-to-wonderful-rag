@@ -76,6 +76,13 @@ Edit `deploy/k8s/configmap.yaml` to configure:
 - Wonderful API URL
 - Sync interval
 
+## Archiving Processed and Failed Files
+
+After a successful upload+attach, files are moved into a `processed/` folder in
+the same bucket/container. Failed uploads are moved into an `error/` folder.
+If you configure a prefix, the service will use `<prefix>/processed/` and
+`<prefix>/error/` instead.
+
 ## Storage Providers
 
 ### AWS S3
