@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+  labels:
+    {{- include "s3-to-wonderful-rag.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "s3-to-wonderful-rag.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "s3-to-wonderful-rag.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: s3-to-wonderful-rag
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: STORAGE_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: storage_provider
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: aws_region
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: s3_bucket
+            - name: S3_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: s3_prefix
+                  optional: true
+            - name: GCS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: gcs_bucket
+                  optional: true
+            - name: GCS_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: gcs_prefix
+                  optional: true
+            - name: AZURE_STORAGE_ACCOUNT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: azure_storage_account
+                  optional: true
+            - name: AZURE_STORAGE_CONTAINER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: azure_storage_container
+                  optional: true
+            - name: AZURE_STORAGE_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: azure_storage_prefix
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: aws_access_key_id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: aws_secret_access_key
+                  optional: true
+            - name: AZURE_STORAGE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: azure_storage_key
+                  optional: true
+            - name: AZURE_STORAGE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: azure_storage_connection_string
+                  optional: true
+            - name: WONDERFUL_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: wonderful_api_url
+            - name: WONDERFUL_RAG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: wonderful_rag_id
+            - name: WONDERFUL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: wonderful_api_key
+            - name: SYNC_INTERVAL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: sync_interval_seconds
+                  optional: true
+            - name: SYNC_INTERVAL_MINUTES
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: sync_interval_minutes
+                  optional: true
+            - name: MAX_FILE_SIZE_MB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: max_file_size_mb
+                  optional: true
+            - name: PORT
+              value: {{ .Values.env.port | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3

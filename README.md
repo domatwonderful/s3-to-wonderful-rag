@@ -264,6 +264,25 @@ container logs -n 200 s3-to-wonderful-rag-local
 container stop s3-to-wonderful-rag-local
 ```
 
+### Helm Chart
+
+Install with the built-in chart:
+```bash
+helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
+  --set env.storageProvider=s3 \
+  --set env.awsRegion=us-east-1 \
+  --set env.s3Bucket=starsliderragdemo \
+  --set env.wonderfulApiUrl=https://swiss-german.api.sb.wonderful.ai \
+  --set secrets.wonderfulRagId=YOUR_RAG_ID \
+  --set secrets.wonderfulApiKey=YOUR_API_KEY
+```
+
+If you already have a Kubernetes secret with credentials:
+```bash
+helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
+  --set secrets.existingSecret=your-secret-name
+```
+
 ## Security Best Practices
 
 1. **Secrets Management**: Use Kubernetes secrets or External Secrets Operator

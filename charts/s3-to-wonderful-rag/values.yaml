@@ -1,0 +1,49 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/domatwonderful/s3-to-wonderful-rag
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nameOverride: ""
+fullnameOverride: ""
+
+env:
+  storageProvider: s3
+  awsRegion: us-east-1
+  s3Bucket: ""
+  s3Prefix: ""
+  gcsBucket: ""
+  gcsPrefix: ""
+  azureStorageAccount: ""
+  azureStorageContainer: ""
+  azureStoragePrefix: ""
+  wonderfulApiUrl: https://swiss-german.api.sb.wonderful.ai
+  syncIntervalSeconds: "1800"
+  syncIntervalMinutes: ""
+  maxFileSizeMb: "0"
+  port: "8080"
+
+secrets:
+  existingSecret: ""
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  azureStorageKey: ""
+  azureStorageConnectionString: ""
+  wonderfulRagId: ""
+  wonderfulApiKey: ""

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+  labels:
+    {{- include "s3-to-wonderful-rag.labels" . | nindent 4 }}
+data:
+  storage_provider: {{ .Values.env.storageProvider | quote }}
+  aws_region: {{ .Values.env.awsRegion | quote }}
+  s3_bucket: {{ .Values.env.s3Bucket | quote }}
+  s3_prefix: {{ .Values.env.s3Prefix | quote }}
+  gcs_bucket: {{ .Values.env.gcsBucket | quote }}
+  gcs_prefix: {{ .Values.env.gcsPrefix | quote }}
+  azure_storage_account: {{ .Values.env.azureStorageAccount | quote }}
+  azure_storage_container: {{ .Values.env.azureStorageContainer | quote }}
+  azure_storage_prefix: {{ .Values.env.azureStoragePrefix | quote }}
+  wonderful_api_url: {{ .Values.env.wonderfulApiUrl | quote }}
+  sync_interval_seconds: {{ .Values.env.syncIntervalSeconds | quote }}
+  sync_interval_minutes: {{ .Values.env.syncIntervalMinutes | quote }}
+  max_file_size_mb: {{ .Values.env.maxFileSizeMb | quote }}
