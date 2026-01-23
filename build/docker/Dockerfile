@@ -41,4 +41,4 @@ COPY --from=builder /build/wonderful-rag-sync .
 EXPOSE 8080
 
 # Run the application
-CMD ["./wonderful-rag-sync"]
+CMD ["/app/wonderful-rag-sync"]
