@@ -77,7 +77,8 @@ env:
   azureStorageAccount: ""
   azureStorageContainer: ""
   azureStoragePrefix: ""
-  wonderfulApiUrl: https://swiss-german.api.sb.wonderful.ai
+  wonderfulTenant: swiss-german
+  wonderfulEnv: sb
   syncIntervalSeconds: "1800"
   syncIntervalMinutes: ""
   maxFileSizeMb: "0"

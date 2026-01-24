@@ -57,7 +57,8 @@ A Kubernetes deployment that automatically syncs files from AWS S3, GCS, or Azur
 | `AZURE_STORAGE_CONTAINER` | Azure container name | Yes (Azure) | - |
 | `AZURE_STORAGE_PREFIX` | Azure prefix/folder path | No (Azure) | - |
 | `AZURE_STORAGE_CONNECTION_STRING` | Azure connection string | Yes (Azure)* | - |
-| `WONDERFUL_API_URL` | Wonderful API base URL | Yes | `https://swiss-german.api.sb.wonderful.ai` |
+| `WONDERFUL_TENANT` | Wonderful tenant (subdomain) | Yes | `swiss-german` |
+| `WONDERFUL_ENV` | Wonderful environment (`dev`, `demo`, `sb`, `prod`) | Yes | `sb` |
 | `WONDERFUL_RAG_ID` | RAG ID for file uploads | Yes | - |
 | `WONDERFUL_API_KEY` | Wonderful API key | Yes | - |
 | `SYNC_INTERVAL_SECONDS` | Sync interval in seconds | No | `1800` |
@@ -194,7 +195,7 @@ kubectl apply -k deploy/k8s/
 
 Files are uploaded to the Wonderful API endpoint:
 ```
-POST https://swiss-german.api.sb.wonderful.ai/api/v1/rags/{rag_id}/files
+POST https://{tenant}.api.{env}.wonderful.ai/api/v1/rags/{rag_id}/files
 ```
 
 Files are uploaded as multipart/form-data with:
@@ -292,7 +293,8 @@ helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
   --set env.storageProvider=s3 \
   --set env.awsRegion=us-east-1 \
   --set env.s3Bucket=starsliderragdemo \
-  --set env.wonderfulApiUrl=https://swiss-german.api.sb.wonderful.ai \
+  --set env.wonderfulTenant=swiss-german \
+  --set env.wonderfulEnv=sb \
   --set secrets.wonderfulRagId=YOUR_RAG_ID \
   --set secrets.wonderfulApiKey=YOUR_API_KEY
 ```

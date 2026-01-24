@@ -13,6 +13,7 @@ data:
   azure_storage_account: ""
   azure_storage_container: ""
   azure_storage_prefix: ""
-  wonderful_api_url: "https://swiss-german.api.sb.wonderful.ai"
+  wonderful_tenant: "swiss-german"
+  wonderful_env: "sb"
   sync_interval_seconds: "20"
   max_file_size_mb: "10"

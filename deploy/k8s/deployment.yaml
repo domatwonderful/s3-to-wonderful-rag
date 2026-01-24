@@ -119,11 +119,16 @@ spec:
               name: wonderful-rag-secrets
               key: azure_storage_connection_string
               optional: true
-        - name: WONDERFUL_API_URL
+        - name: WONDERFUL_TENANT
           valueFrom:
             configMapKeyRef:
               name: wonderful-rag-config
-              key: wonderful_api_url
+              key: wonderful_tenant
+        - name: WONDERFUL_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: wonderful-rag-config
+              key: wonderful_env
         - name: WONDERFUL_RAG_ID
           valueFrom:
             secretKeyRef:

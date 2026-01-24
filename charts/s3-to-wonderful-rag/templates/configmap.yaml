@@ -14,7 +14,8 @@ data:
   azure_storage_account: {{ .Values.env.azureStorageAccount | quote }}
   azure_storage_container: {{ .Values.env.azureStorageContainer | quote }}
   azure_storage_prefix: {{ .Values.env.azureStoragePrefix | quote }}
-  wonderful_api_url: {{ .Values.env.wonderfulApiUrl | quote }}
+  wonderful_tenant: {{ .Values.env.wonderfulTenant | quote }}
+  wonderful_env: {{ .Values.env.wonderfulEnv | quote }}
   sync_interval_seconds: {{ .Values.env.syncIntervalSeconds | quote }}
   sync_interval_minutes: {{ .Values.env.syncIntervalMinutes | quote }}
   max_file_size_mb: {{ .Values.env.maxFileSizeMb | quote }}

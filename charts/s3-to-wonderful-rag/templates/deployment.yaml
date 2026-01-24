@@ -117,11 +117,16 @@ spec:
                   name: {{ include "s3-to-wonderful-rag.secretName" . }}
                   key: azure_storage_connection_string
                   optional: true
-            - name: WONDERFUL_API_URL
+            - name: WONDERFUL_TENANT
               valueFrom:
                 configMapKeyRef:
                   name: {{ include "s3-to-wonderful-rag.fullname" . }}
-                  key: wonderful_api_url
+                  key: wonderful_tenant
+            - name: WONDERFUL_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.fullname" . }}
+                  key: wonderful_env
             - name: WONDERFUL_RAG_ID
               valueFrom:
                 secretKeyRef:

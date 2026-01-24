@@ -39,6 +39,8 @@ var (
 	storageLocation  string
 	storagePrefix    string
 	wonderfulAPIURL  string
+	wonderfulTenant  string
+	wonderfulEnv     string
 	wonderfulRAGID   string
 	wonderfulAPIKey  string
 	syncInterval     time.Duration
@@ -403,7 +405,12 @@ func init() {
 
 func main() {
 	// Load configuration
-	wonderfulAPIURL = getEnv("WONDERFUL_API_URL", "https://swiss-german.api.sb.wonderful.ai")
+	wonderfulTenant = getEnv("WONDERFUL_TENANT", "swiss-german")
+	wonderfulEnv = getEnv("WONDERFUL_ENV", "sb")
+	if !isValidWonderfulEnv(wonderfulEnv) {
+		logger.Fatalf("Invalid WONDERFUL_ENV: %s (allowed: dev, demo, sb, prod)", wonderfulEnv)
+	}
+	wonderfulAPIURL = buildWonderfulAPIURL(wonderfulTenant, wonderfulEnv)
 	wonderfulRAGID = getEnv("WONDERFUL_RAG_ID", "")
 	wonderfulAPIKey = getEnv("WONDERFUL_API_KEY", "")
 	intervalSeconds := getEnv("SYNC_INTERVAL_SECONDS", "")
@@ -413,6 +420,7 @@ func main() {
 
 	logger.Info("=== Wonderful RAG Storage Sync Service Starting ===")
 	logger.Debugf("Wonderful API URL: %s", wonderfulAPIURL)
+	logger.Debugf("Wonderful tenant: %s, env: %s", wonderfulTenant, wonderfulEnv)
 	logger.Debugf("Wonderful RAG ID: %s", wonderfulRAGID)
 
 	if wonderfulRAGID == "" {
@@ -708,6 +716,19 @@ func boolToFloat(value bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func isValidWonderfulEnv(env string) bool {
+	switch env {
+	case "dev", "demo", "sb", "prod":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildWonderfulAPIURL(tenant, env string) string {
+	return fmt.Sprintf("https://%s.api.%s.wonderful.ai", tenant, env)
 }
 
 func newTraceID() string {
