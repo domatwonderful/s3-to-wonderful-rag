@@ -2,6 +2,14 @@
 
 A Kubernetes deployment that automatically syncs files from AWS S3, GCS, or Azure Blob Storage to the Wonderful AI Platform API.
 
+## Supported Cloud Providers
+
+| Provider | Status | Notes |
+|----------|--------|-------|
+| AWS S3 | Tested | Verified in local tests |
+| Google Cloud Storage | Tested | Verified in local tests |
+| Azure Blob Storage | Not tested | Configuration supported, not validated yet |
+
 ## Architecture
 
 ```
