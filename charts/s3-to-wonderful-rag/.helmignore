@@ -2,8 +2,8 @@
 .git
 .idea
 .vscode
-**/.env
-**/.env.*
-**/node_modules
-**/dist
-**/build
+.env
+.env.*
+node_modules
+dist
+build
