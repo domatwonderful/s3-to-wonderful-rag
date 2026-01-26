@@ -76,13 +76,13 @@ A Kubernetes deployment that automatically syncs files from AWS S3, GCS, or Azur
 
 *Credentials depend on provider. For Azure, set `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_ACCOUNT` + `AZURE_STORAGE_KEY`.
 
-### ConfigMap
+### Helm Values
 
-Edit `deploy/k8s/configmap.yaml` to configure:
+Edit `charts/s3-to-wonderful-rag/values.yaml` or pass overrides with `--set` to configure:
 - Storage provider
 - Provider-specific bucket/container and prefix
 - AWS region (S3 only)
-- Wonderful API URL
+- Wonderful tenant and environment
 - Sync interval
 
 ## Archiving Processed and Failed Files
@@ -114,26 +114,16 @@ If you configure a prefix, the service will use `<prefix>/processed/` and
 
 ### Secrets
 
-1. Copy the example secrets file:
+Create a Kubernetes secret (or ExternalSecret) and reference it via Helm:
 ```bash
-cp deploy/k8s/secrets.yaml.example deploy/k8s/secrets.yaml
+helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
+  --set secrets.existingSecret=your-secret-name
 ```
 
-2. Edit `deploy/k8s/secrets.yaml` with your actual values:
-```yaml
-stringData:
-  aws_access_key_id: "your-aws-access-key-id"
-  aws_secret_access_key: "your-aws-secret-access-key"
-  azure_storage_key: "your-azure-storage-key"
-  azure_storage_connection_string: "your-azure-connection-string"
-  wonderful_rag_id: "your-rag-id"
-  wonderful_api_key: "your-api-key"
-```
-
-3. Create the secret:
-```bash
-kubectl apply -f deploy/k8s/secrets.yaml
-```
+Your secret should contain:
+- `wonderful_rag_id`
+- `wonderful_api_key`
+- Optional provider credentials (e.g. `aws_access_key_id`, `aws_secret_access_key`)
 
 ## API Endpoints
 
@@ -179,13 +169,15 @@ GET /api/v1/processed-files
 
 ## Deployment
 
-### Using kubectl
+### Using Helm
 ```bash
-# Create secret first
-kubectl apply -f deploy/k8s/secrets.yaml
-
-# Deploy application
-kubectl apply -k deploy/k8s/
+helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
+  --set env.storageProvider=s3 \
+  --set env.awsRegion=us-east-1 \
+  --set env.s3Bucket=starsliderragdemo \
+  --set env.wonderfulTenant=swiss-german \
+  --set env.wonderfulEnv=sb \
+  --set secrets.existingSecret=your-secret-name
 ```
 
 ## How It Works
@@ -255,13 +247,8 @@ s3-to-wonderful-rag/
 ├── build/                    # Build assets
 │   └── docker/
 │       └── Dockerfile
-├── deploy/                   # Deployment manifests
-│   └── k8s/
-│       ├── configmap.yaml
-│       ├── deployment.yaml
-│       ├── kustomization.yaml
-│       ├── namespace.yaml
-│       └── secrets.yaml.example
+├── charts/                   # Helm chart
+│   └── s3-to-wonderful-rag/
 ├── .dockerignore             # Docker ignore rules
 ├── go.mod                    # Go module definition
 └── README.md                 # This file
@@ -270,7 +257,7 @@ s3-to-wonderful-rag/
 ### Building the Docker Image
 
 Build and publish your image to a registry your cluster can access, then update
-`deploy/k8s/deployment.yaml` to point at it.
+`charts/s3-to-wonderful-rag/values.yaml` (image repository/tag/digest).
 
 For manual builds:
 ```bash
