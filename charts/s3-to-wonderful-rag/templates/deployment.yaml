@@ -24,12 +24,7 @@ spec:
       {{- end }}
       containers:
         - name: s3-to-wonderful-rag
-          image: >-
-            {{- if .Values.image.digest -}}
-            {{ .Values.image.repository }}@{{ .Values.image.digest }}
-            {{- else -}}
-            {{ .Values.image.repository }}:{{ .Values.image.tag }}
-            {{- end -}}
+          image: "{{- if .Values.image.digest -}}{{ .Values.image.repository }}@{{ .Values.image.digest }}{{- else -}}{{ .Values.image.repository }}:{{ .Values.image.tag }}{{- end -}}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
