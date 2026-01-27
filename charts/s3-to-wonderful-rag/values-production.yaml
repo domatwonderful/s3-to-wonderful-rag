@@ -1,0 +1,139 @@
+# Production values for s3-to-wonderful-rag
+# This file demonstrates secure configuration for production deployments
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/domatwonderful/s3-to-wonderful-rag
+  # Pin to specific digest for reproducibility and security
+  digest: ""  # Set to specific SHA256 digest
+  tag: "latest"  # Or use semantic version tag
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+automountServiceAccountToken: false
+
+serviceAccount:
+  create: true
+  name: ""
+  # For cloud provider IAM integration:
+  annotations: {}
+    # AWS IRSA:
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/s3-to-wonderful-rag-role
+    # GCP Workload Identity:
+    # iam.gke.io/gcp-service-account: s3-to-wonderful-rag@project.iam.gserviceaccount.com
+    # Azure Managed Identity:
+    # azure.workload.identity/client-id: "12345678-1234-1234-1234-123456789012"
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# Network Policy - CRITICAL: Configure allowedCidrs for production
+networkPolicy:
+  enabled: true
+  allowDns: true
+  allowHttpsEgress: true
+  # IMPORTANT: Restrict to specific cloud provider and API IP ranges
+  # See SECURITY.md for guidance on finding IP ranges
+  allowedCidrs:
+    # Example AWS S3 (us-east-1) - UPDATE FOR YOUR REGION
+    - 52.216.0.0/15
+    - 3.5.0.0/16
+    - 54.231.0.0/16
+    # Example GCS - UPDATE FOR YOUR REGION
+    # - 34.64.0.0/10
+    # - 35.184.0.0/13
+    # Example Azure Storage - UPDATE FOR YOUR REGION
+    # - 20.38.0.0/16
+    # - 20.150.0.0/16
+    # Wonderful API - UPDATE WITH ACTUAL IP
+    - 1.2.3.4/32
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+extraVolumes:
+  - name: tmp
+    emptyDir:
+      sizeLimit: 500Mi
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+# Environment configuration
+env:
+  storageProvider: s3
+  awsRegion: us-east-1
+  s3Bucket: "production-bucket-name"
+  s3Prefix: "data/"
+  gcsBucket: ""
+  gcsPrefix: ""
+  azureStorageAccount: ""
+  azureStorageContainer: ""
+  azureStoragePrefix: ""
+  wonderfulTenant: swiss-german
+  wonderfulEnv: prod  # Use 'prod' for production
+  syncIntervalSeconds: "3600"  # 1 hour
+  syncIntervalMinutes: ""
+  maxFileSizeMb: "100"  # 100 MB limit
+  port: "8080"
+  # CRITICAL: Set internal API key for production
+  internalApiKey: ""  # Should be set via existingSecret
+
+# Secrets - CRITICAL: Use existingSecret for production
+secrets:
+  # REQUIRED: Reference externally managed secret
+  # Use External Secrets Operator, Vault, Sealed Secrets, or cloud secret manager
+  existingSecret: "s3-to-wonderful-rag-secrets"
+
+  # DO NOT use inline secrets in production
+  # These should remain empty and secrets should be managed externally
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  azureStorageKey: ""
+  azureStorageConnectionString: ""
+  wonderfulRagId: ""
+  wonderfulApiKey: ""
+  internalApiKey: ""
+
+# Additional production considerations:
+# 1. Enable monitoring and alerting for the deployment
+# 2. Configure log aggregation and retention
+# 3. Set up automated security scanning in CI/CD
+# 4. Implement secret rotation procedures
+# 5. Regular backup and disaster recovery testing
+# 6. Document incident response procedures
+# 7. Schedule regular security audits

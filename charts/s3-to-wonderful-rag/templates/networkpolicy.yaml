@@ -10,9 +10,20 @@ spec:
     matchLabels:
       {{- include "s3-to-wonderful-rag.selectorLabels" . | nindent 6 }}
   policyTypes:
+    - Ingress
     - Egress
+  ingress:
+    # Allow ingress from within the same namespace only
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - protocol: TCP
+          port: 8080
   egress:
     {{- if .Values.networkPolicy.allowDns }}
+    # Allow DNS resolution
     - to:
         - namespaceSelector:
             matchLabels:
@@ -27,11 +38,25 @@ spec:
           port: 53
     {{- end }}
     {{- if .Values.networkPolicy.allowHttpsEgress }}
+    # Allow HTTPS to specific cloud provider and API endpoints
+    # Note: These are broad ranges. For production, restrict to specific service endpoints.
+    {{- if .Values.networkPolicy.allowedCidrs }}
+    {{- range .Values.networkPolicy.allowedCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- else }}
+    # Fallback: Allow all HTTPS (INSECURE - configure allowedCidrs for production)
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
       ports:
         - protocol: TCP
           port: 443
+    {{- end }}
     {{- end }}
 {{- end }}

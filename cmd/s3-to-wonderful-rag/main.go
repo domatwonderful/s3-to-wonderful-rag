@@ -43,6 +43,7 @@ var (
 	wonderfulEnv     string
 	wonderfulRAGID   string
 	wonderfulAPIKey  string
+	internalAPIKey   string // API key for internal endpoints
 	syncInterval     time.Duration
 	maxFileSize      int64 // Maximum file size in bytes (0 = no limit)
 	processedObjects   map[string]bool
@@ -413,6 +414,7 @@ func main() {
 	wonderfulAPIURL = buildWonderfulAPIURL(wonderfulTenant, wonderfulEnv)
 	wonderfulRAGID = getEnv("WONDERFUL_RAG_ID", "")
 	wonderfulAPIKey = getEnv("WONDERFUL_API_KEY", "")
+	internalAPIKey = getEnv("INTERNAL_API_KEY", "") // Optional: for securing internal endpoints
 	intervalSeconds := getEnv("SYNC_INTERVAL_SECONDS", "")
 	intervalMinutes := getEnv("SYNC_INTERVAL_MINUTES", "") // Fallback for backward compatibility
 	maxFileSizeMB := getEnv("MAX_FILE_SIZE_MB", "0") // 0 = no limit
@@ -777,12 +779,15 @@ func setupRouter() *gin.Engine {
 	router := gin.Default()
 	router.Use(gin.Logger(), gin.Recovery())
 
-	// Health check
+	// Health check (public)
 	router.GET("/health", healthHandler)
+
+	// Metrics endpoint (public - typically restricted by network policy or service mesh)
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// API routes
+	// API routes - protected by API key authentication
 	api := router.Group("/api/v1")
+	api.Use(apiKeyAuthMiddleware())
 	{
 		api.POST("/sync", triggerSync)
 		api.GET("/stats", getStats)
@@ -790,6 +795,57 @@ func setupRouter() *gin.Engine {
 	}
 
 	return router
+}
+
+// apiKeyAuthMiddleware validates API key for internal endpoints
+func apiKeyAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// If INTERNAL_API_KEY is not set, log warning but allow access (backward compatibility)
+		if internalAPIKey == "" {
+			logger.Warn("INTERNAL_API_KEY not set - API endpoints are not protected. This is a security risk.")
+			c.Next()
+			return
+		}
+
+		// Check for API key in header (x-api-key) or query parameter (api_key)
+		providedKey := c.GetHeader("x-api-key")
+		if providedKey == "" {
+			providedKey = c.Query("api_key")
+		}
+
+		if providedKey == "" {
+			logger.Warn("API request without authentication attempted")
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Missing API key. Provide x-api-key header or api_key query parameter.",
+			})
+			c.Abort()
+			return
+		}
+
+		// Constant-time comparison to prevent timing attacks
+		if !secureCompare(providedKey, internalAPIKey) {
+			logger.Warnf("API request with invalid API key attempted from %s", c.ClientIP())
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Invalid API key",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// secureCompare performs constant-time string comparison
+func secureCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	result := 0
+	for i := 0; i < len(a); i++ {
+		result |= int(a[i]) ^ int(b[i])
+	}
+	return result == 0
 }
 
 func healthHandler(c *gin.Context) {

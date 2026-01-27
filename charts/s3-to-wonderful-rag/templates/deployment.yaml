@@ -132,6 +132,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "s3-to-wonderful-rag.secretName" . }}
                   key: wonderful_api_key
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s3-to-wonderful-rag.secretName" . }}
+                  key: internal_api_key
+                  optional: true
             - name: SYNC_INTERVAL_SECONDS
               valueFrom:
                 configMapKeyRef:

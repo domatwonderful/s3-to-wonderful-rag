@@ -44,6 +44,21 @@ networkPolicy:
   enabled: true
   allowDns: true
   allowHttpsEgress: true
+  # Restrict egress to specific IP ranges for better security
+  # Leave empty to allow all HTTPS (not recommended for production)
+  # Configure these based on your cloud provider and region
+  allowedCidrs: []
+  # Example AWS S3 IP ranges (us-east-1):
+  # - 52.216.0.0/15
+  # - 3.5.0.0/16
+  # Example GCS IP ranges:
+  # - 34.64.0.0/10
+  # - 35.184.0.0/13
+  # Example Azure Storage IP ranges:
+  # - 20.38.0.0/16
+  # - 20.150.0.0/16
+  # Example Wonderful API (adjust based on actual infrastructure):
+  # - 1.2.3.4/32  # Replace with actual IP
 
 podSecurityContext:
   runAsNonRoot: true
@@ -83,12 +98,25 @@ env:
   syncIntervalMinutes: ""
   maxFileSizeMb: "0"
   port: "8080"
+  # Optional: Set this to secure internal API endpoints (/api/v1/sync, /api/v1/stats, etc.)
+  # Leave empty to disable authentication (not recommended for production)
+  internalApiKey: ""
 
 secrets:
+  # SECURITY BEST PRACTICE: Use existingSecret with external secret management
+  # (e.g., External Secrets Operator, Vault, Sealed Secrets)
+  # Setting inline secrets via --set is INSECURE as they get stored in:
+  # - Shell history
+  # - Helm release history (plaintext)
+  # - kubectl/helm command output
   existingSecret: ""
+
+  # WARNING: The following inline secrets are provided for testing/development only
+  # DO NOT use in production environments
   awsAccessKeyId: ""
   awsSecretAccessKey: ""
   azureStorageKey: ""
   azureStorageConnectionString: ""
   wonderfulRagId: ""
   wonderfulApiKey: ""
+  internalApiKey: ""

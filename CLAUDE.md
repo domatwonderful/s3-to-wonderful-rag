@@ -217,12 +217,38 @@ All application logic is in `cmd/s3-to-wonderful-rag/main.go`. There are no inte
 
 ### Security
 
-Helm chart includes security best practices:
+**Pod Security:**
 - Non-root user (UID 10001)
 - Read-only root filesystem
 - Drop all capabilities
-- Network policies restricting egress to DNS and HTTPS
+- seccompProfile: RuntimeDefault
 - Pod Disruption Budget enabled by default
+
+**API Authentication:**
+- Internal API endpoints (`/api/v1/sync`, `/api/v1/stats`, `/api/v1/processed-files`) are protected by API key authentication
+- Set `INTERNAL_API_KEY` environment variable (or `secrets.internalApiKey` in Helm) to enable protection
+- If not set, endpoints are accessible without authentication (logs warning)
+- API key can be provided via `x-api-key` header or `api_key` query parameter
+- Uses constant-time comparison to prevent timing attacks
+
+**Network Policies:**
+- Ingress: Only allows traffic from within the same namespace on port 8080
+- Egress: Restricts to DNS (port 53) and HTTPS (port 443)
+- Configure `networkPolicy.allowedCidrs` to restrict HTTPS to specific cloud provider IP ranges (recommended for production)
+- Example CIDR configuration:
+  ```yaml
+  networkPolicy:
+    allowedCidrs:
+      - 52.216.0.0/15  # AWS S3 (us-east-1)
+      - 3.5.0.0/16     # AWS S3 (us-east-1)
+      - 1.2.3.4/32     # Wonderful API IP
+  ```
+
+**Secrets Management:**
+- **CRITICAL**: Use `secrets.existingSecret` with external secret management (External Secrets Operator, Vault, Sealed Secrets)
+- Inline secrets via `--set` are insecure and should only be used for testing/development
+- Inline secrets are stored in shell history, Helm release history (plaintext), and command output
+- Secret template includes annotation warning about security risks
 
 ### Storage Client Interface
 
@@ -240,11 +266,48 @@ type StorageClient interface {
 
 ## Secrets Management
 
-Helm chart supports two patterns:
-1. **Existing Secret**: Set `secrets.existingSecret` to reference a pre-created Kubernetes secret
-2. **Inline Values**: Pass secrets via `--set secrets.wonderfulRagId=...` etc.
+**SECURITY WARNING:** Always use external secret management for production deployments.
 
-Required secret keys:
+Helm chart supports two patterns:
+
+### 1. **Existing Secret (RECOMMENDED for production)**
+Set `secrets.existingSecret` to reference a pre-created Kubernetes secret managed by:
+- External Secrets Operator
+- HashiCorp Vault
+- Sealed Secrets
+- Cloud provider secret managers (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault)
+
+Example:
+```bash
+# Create secret externally (e.g., via External Secrets Operator)
+# Then reference it in Helm:
+helm install s3-to-wonderful-rag ./charts/s3-to-wonderful-rag \
+  --set secrets.existingSecret=my-external-secret
+```
+
+### 2. **Inline Values (INSECURE - for testing/development only)**
+Pass secrets via `--set` flags. This is insecure because:
+- Secrets stored in shell history
+- Secrets stored in Helm release history (plaintext, visible via `helm get values`)
+- Secrets visible in command output
+
+Required secret keys (whether using existingSecret or inline):
 - `wonderful_rag_id` - RAG ID for file attachments
-- `wonderful_api_key` - API key for authentication
+- `wonderful_api_key` - API key for Wonderful API authentication
+- `internal_api_key` - (Optional) API key for securing internal endpoints
 - Provider-specific: `aws_access_key_id`, `aws_secret_access_key`, `azure_storage_key`, etc.
+
+Example Kubernetes secret structure:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-external-secret
+type: Opaque
+stringData:
+  wonderful_rag_id: "rag-xyz"
+  wonderful_api_key: "wf-key-abc"
+  internal_api_key: "secure-random-key"
+  aws_access_key_id: "AKIA..."
+  aws_secret_access_key: "..."
+```
