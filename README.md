@@ -12,26 +12,57 @@ A Kubernetes deployment that automatically syncs files from AWS S3, GCS, or Azur
 
 ## Architecture
 
+For a comprehensive architecture overview including detailed component diagrams, data flows, and security architecture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
+### High-Level Overview
+
 ```
-┌─────────────────┐
-│   Storage       │
-│   Bucket        │
-└────────┬────────┘
-         │
-         │ Download Files
-         │
-┌────────▼────────┐
-│  Sync Service   │
-│  (Go Container) │
-└────────┬────────┘
-         │
-         │ Upload Files
-         │
-┌────────▼──────────────────┐
-│  Wonderful AI Platform    │
-│  API                      │
-└───────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│              Cloud Storage (AWS S3 / GCS / Azure)            │
+│  • Source bucket/container with files                        │
+│  • Archive folders: {prefix}/processed/, {prefix}/error/     │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ List, Download, Move
+                       │
+┌──────────────────────▼───────────────────────────────────────┐
+│              Kubernetes Pod (wonderful-rag-sync)             │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Go Application (Port 8080)                            │  │
+│  │                                                         │  │
+│  │  Components:                                            │  │
+│  │  • Storage Client Interface (S3/GCS/Azure)             │  │
+│  │  • Background Sync Goroutine (periodic)                │  │
+│  │  • HTTP Server (Gin) - health, metrics, API            │  │
+│  │  • Prometheus Metrics                                  │  │
+│  │                                                         │  │
+│  │  Upload Process (3 Steps):                             │  │
+│  │  1. POST /api/v1/storage (get pre-signed S3 URL)       │  │
+│  │  2. PUT {presigned-url} (upload to Wonderful's S3)     │  │
+│  │  3. POST /api/v1/rags/{id}/files (attach to RAG)       │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ HTTPS (x-api-key auth)
+                       │
+┌──────────────────────▼───────────────────────────────────────┐
+│          Wonderful RAG API                                   │
+│  https://{tenant}.api.{env}.wonderful.ai                     │
+│  • Provides pre-signed S3 URLs for uploads                   │
+│  • Manages RAG file attachments                              │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+### Data Flow
+
+1. **Discovery**: Service lists files from configured storage provider (filtered by prefix)
+2. **Download**: Files are downloaded from source storage into memory
+3. **Upload (3-step process)**:
+   - Step 1: Request pre-signed S3 URL from Wonderful API
+   - Step 2: Upload file directly to S3 using pre-signed URL
+   - Step 3: Attach uploaded file to RAG via API
+4. **Archive**: Successfully processed files → `processed/`, failed files → `error/`
+5. **Metrics**: All operations are tracked via Prometheus metrics
 
 ## Components
 
