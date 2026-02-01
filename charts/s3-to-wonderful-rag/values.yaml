@@ -20,8 +20,9 @@ metrics:
   port: 8080
   serviceMonitor:
     enabled: true
-    # Additional labels for ServiceMonitor (e.g., for prometheus-operator discovery)
-    labels: {}
+    # Additional labels for ServiceMonitor (required for victoria-metrics-k8s-stack discovery)
+    labels:
+      release: prometheus-operator
     # Annotations for ServiceMonitor
     annotations: {}
     # Scrape interval
