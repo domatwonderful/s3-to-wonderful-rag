@@ -4,6 +4,10 @@ metadata:
   name: {{ include "s3-to-wonderful-rag.fullname" . }}
   labels:
     {{- include "s3-to-wonderful-rag.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -11,5 +15,11 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.targetPort }}
       protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.metrics.port | default 8080 }}
+      targetPort: {{ .Values.metrics.port | default 8080 }}
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "s3-to-wonderful-rag.selectorLabels" . | nindent 4 }}

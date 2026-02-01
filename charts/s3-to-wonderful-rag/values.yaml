@@ -12,6 +12,26 @@ service:
   type: ClusterIP
   port: 80
   targetPort: 8080
+  annotations: {}
+
+# Prometheus/Victoria Metrics configuration
+metrics:
+  enabled: true
+  port: 8080
+  serviceMonitor:
+    enabled: true
+    # Additional labels for ServiceMonitor (e.g., for prometheus-operator discovery)
+    labels: {}
+    # Annotations for ServiceMonitor
+    annotations: {}
+    # Scrape interval
+    interval: "30s"
+    # Scrape timeout
+    scrapeTimeout: "10s"
+    # Relabeling rules
+    relabelings: []
+    # Metric relabeling rules
+    metricRelabelings: []
 
 resources:
   requests:
