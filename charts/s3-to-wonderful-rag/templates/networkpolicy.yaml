@@ -13,7 +13,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow ingress from within the same namespace only
+    # Allow ingress from within the same namespace
     - from:
         - namespaceSelector:
             matchLabels:
@@ -21,6 +21,16 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    {{- if .Values.metrics.enabled }}
+    # Allow metrics scraping from monitoring namespace (Victoria Metrics / Prometheus)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.metricsNamespace | default "monitoring" }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.metrics.port | default 8080 }}
+    {{- end }}
   egress:
     {{- if .Values.networkPolicy.allowDns }}
     # Allow DNS resolution

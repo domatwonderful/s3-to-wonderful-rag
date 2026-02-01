@@ -65,6 +65,8 @@ networkPolicy:
   enabled: true
   allowDns: true
   allowHttpsEgress: true
+  # Namespace where Victoria Metrics / Prometheus is deployed (for metrics scraping)
+  metricsNamespace: "monitoring"
   # Restrict egress to specific IP ranges for better security
   # Leave empty to allow all HTTPS (not recommended for production)
   # Configure these based on your cloud provider and region
