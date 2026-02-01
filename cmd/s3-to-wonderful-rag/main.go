@@ -3,14 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,6 +38,29 @@ import (
 	"google.golang.org/api/iterator"
 )
 
+// Configuration constants
+const (
+	// Maximum number of entries in processedObjects cache before pruning
+	maxProcessedObjectsCache = 10000
+	// TTL for processed objects cache entries
+	processedObjectsCacheTTL = 24 * time.Hour
+	// Valid pre-signed URL hosts for cloud storage
+	validPresignedURLHosts = `^(.*\.s3\..*\.amazonaws\.com|.*\.s3\.amazonaws\.com|storage\.googleapis\.com|.*\.blob\.core\.windows\.net)$`
+	// Rate limit: maximum API requests per minute
+	apiRateLimitPerMinute = 60
+	// Maximum request body size (10MB)
+	maxRequestBodySize = 10 * 1024 * 1024
+	// Minimum sync interval in seconds
+	minSyncIntervalSeconds = 60
+	// Maximum sync interval in seconds (24 hours)
+	maxSyncIntervalSeconds = 86400
+)
+
+// processedObjectEntry stores cache entry with timestamp for TTL-based pruning
+type processedObjectEntry struct {
+	processedAt time.Time
+}
+
 var (
 	logger           *logrus.Logger
 	storageClient    StorageClient
@@ -46,8 +75,26 @@ var (
 	internalAPIKey   string // API key for internal endpoints
 	syncInterval     time.Duration
 	maxFileSize      int64 // Maximum file size in bytes (0 = no limit)
-	processedObjects   map[string]bool
+
+	// Processed objects cache with TTL support
+	processedObjects   map[string]processedObjectEntry
 	processedObjectsMu sync.RWMutex
+
+	// Sync mutex to prevent concurrent sync operations
+	syncMu       sync.Mutex
+	syncRunning  bool
+	syncRunningMu sync.RWMutex
+
+	// Rate limiting for API endpoints
+	apiRequestCounts   map[string][]time.Time
+	apiRequestCountsMu sync.Mutex
+
+	// Pre-compiled regex for URL validation
+	presignedURLHostRegex *regexp.Regexp
+
+	// Cancellation context for graceful shutdown
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 
 	httpClient *http.Client
 )
@@ -200,7 +247,7 @@ func (s *S3Storage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 		return true
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list objects from S3 bucket %s: %w", s.bucket, err)
 	}
 	return objects, nil
 }
@@ -212,7 +259,7 @@ func (s *S3Storage) DownloadObject(ctx context.Context, key string) ([]byte, err
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to download object %s from S3 bucket %s: %w", key, s.bucket, err)
 	}
 	return buf.Bytes(), nil
 }
@@ -260,7 +307,7 @@ func (g *GCSStorage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to list objects from GCS bucket %s: %w", g.bucket, err)
 		}
 		objects = append(objects, ObjectInfo{
 			Key:          attrs.Name,
@@ -274,10 +321,14 @@ func (g *GCSStorage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 func (g *GCSStorage) DownloadObject(ctx context.Context, key string) ([]byte, error) {
 	reader, err := g.client.Bucket(g.bucket).Object(key).NewReader(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create reader for GCS object %s in bucket %s: %w", key, g.bucket, err)
 	}
 	defer reader.Close()
-	return io.ReadAll(reader)
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read GCS object %s from bucket %s: %w", key, g.bucket, err)
+	}
+	return data, nil
 }
 
 func (g *GCSStorage) MoveObject(ctx context.Context, srcKey, destKey string) error {
@@ -312,7 +363,7 @@ func (a *AzureStorage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 	for pager.More() {
 		resp, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to list blobs from Azure container %s: %w", a.container, err)
 		}
 		for _, item := range resp.Segment.BlobItems {
 			if item.Name == nil {
@@ -341,39 +392,73 @@ func (a *AzureStorage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 func (a *AzureStorage) DownloadObject(ctx context.Context, key string) ([]byte, error) {
 	resp, err := a.client.DownloadStream(ctx, a.container, key, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to download blob %s from Azure container %s: %w", key, a.container, err)
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read blob %s from Azure container %s: %w", key, a.container, err)
+	}
+	return data, nil
 }
 
 func (a *AzureStorage) MoveObject(ctx context.Context, srcKey, destKey string) error {
 	if srcKey == destKey {
 		return nil
 	}
-	data, err := a.DownloadObject(ctx, srcKey)
+
+	// Use server-side copy instead of download/upload to save bandwidth and time
+	// Get the source blob URL
+	srcBlobURL := fmt.Sprintf("%s/%s", a.client.URL(), url.PathEscape(a.container+"/"+srcKey))
+
+	// Get a blob client for the destination
+	destBlobClient := a.client.ServiceClient().NewContainerClient(a.container).NewBlobClient(destKey)
+
+	// Start the copy operation (server-side copy)
+	_, err := destBlobClient.StartCopyFromURL(ctx, srcBlobURL, nil)
 	if err != nil {
-		return err
+		// Fallback to download/upload if server-side copy fails
+		logger.Warnf("Server-side copy failed, falling back to download/upload: %v", err)
+		data, err := a.DownloadObject(ctx, srcKey)
+		if err != nil {
+			return fmt.Errorf("failed to download source blob: %w", err)
+		}
+		_, err = a.client.UploadBuffer(ctx, a.container, destKey, data, &azblob.UploadBufferOptions{
+			HTTPHeaders: &blob.HTTPHeaders{
+				BlobContentType: to.Ptr("application/octet-stream"),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to upload to destination: %w", err)
+		}
 	}
-	_, err = a.client.UploadBuffer(ctx, a.container, destKey, data, &azblob.UploadBufferOptions{
-		HTTPHeaders: &blob.HTTPHeaders{
-			BlobContentType: to.Ptr("application/octet-stream"),
-		},
-	})
-	if err != nil {
-		return err
-	}
+
+	// Delete the source blob
 	_, err = a.client.DeleteBlob(ctx, a.container, srcKey, nil)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete source blob after copy: %w", err)
+	}
+	return nil
 }
 
 func init() {
 	logger = logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
-	logger.SetLevel(logrus.DebugLevel) // Verbose logging
-	processedObjects = make(map[string]bool)
-	rand.Seed(time.Now().UnixNano())
+	logger.SetLevel(logrus.InfoLevel) // Production-safe default log level
 
+	// Initialize processed objects cache with TTL support
+	processedObjects = make(map[string]processedObjectEntry)
+
+	// Initialize rate limiting map
+	apiRequestCounts = make(map[string][]time.Time)
+
+	// Compile pre-signed URL validation regex
+	presignedURLHostRegex = regexp.MustCompile(validPresignedURLHosts)
+
+	// Initialize shutdown context
+	shutdownCtx, shutdownCancel = context.WithCancel(context.Background())
+
+	// Configure HTTP client with explicit TLS settings for security
 	httpClient = &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -384,6 +469,11 @@ func init() {
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 15 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			// Explicit TLS configuration - never allow insecure connections
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: false, // SECURITY: Always verify TLS certificates
+			},
 		},
 	}
 
@@ -432,7 +522,7 @@ func main() {
 		logger.Fatal("WONDERFUL_API_KEY is required")
 	}
 
-	// Parse sync interval (prefer seconds, fallback to minutes)
+	// Parse sync interval (prefer seconds, fallback to minutes) with validation
 	var interval time.Duration
 	var err error
 	if intervalSeconds != "" {
@@ -450,6 +540,16 @@ func main() {
 	} else {
 		interval = 30 * time.Minute
 		logger.Warnf("No sync interval specified, using default: %v", interval)
+	}
+
+	// Validate sync interval bounds
+	if interval.Seconds() < float64(minSyncIntervalSeconds) {
+		logger.Warnf("Sync interval %v is below minimum (%ds), using minimum", interval, minSyncIntervalSeconds)
+		interval = time.Duration(minSyncIntervalSeconds) * time.Second
+	}
+	if interval.Seconds() > float64(maxSyncIntervalSeconds) {
+		logger.Warnf("Sync interval %v exceeds maximum (%ds), using maximum", interval, maxSyncIntervalSeconds)
+		interval = time.Duration(maxSyncIntervalSeconds) * time.Second
 	}
 	syncInterval = interval
 
@@ -484,21 +584,35 @@ func main() {
 	}
 	logger.Infof("Configuration loaded - Provider: %s, Location: %s, Prefix: %s", storageProvider, storageLocation, storagePrefix)
 
-	// Start background sync job
+	// Start background sync job with graceful shutdown support
 	logger.Info("Starting background sync job...")
 	go func() {
 		// Initial sync
 		logger.Info("Performing initial sync...")
+		syncMu.Lock()
 		syncStorageToWonderful()
+		syncMu.Unlock()
 
-		// Periodic sync
+		// Periodic sync with shutdown context
 		ticker := time.NewTicker(syncInterval)
 		defer ticker.Stop()
 
 		logger.Infof("Starting periodic sync (interval: %v)", syncInterval)
-		for range ticker.C {
-			logger.Debugf("Sync interval reached (%v), triggering sync...", syncInterval)
-			syncStorageToWonderful()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				logger.Info("Background sync job shutting down...")
+				return
+			case <-ticker.C:
+				// Try to acquire lock, skip if already running
+				if syncMu.TryLock() {
+					logger.Debugf("Sync interval reached (%v), triggering sync...", syncInterval)
+					syncStorageToWonderful()
+					syncMu.Unlock()
+				} else {
+					logger.Debug("Skipping scheduled sync - previous sync still running")
+				}
+			}
 		}
 	}()
 
@@ -524,10 +638,41 @@ func main() {
 	<-quit
 
 	logger.Info("Shutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	// Signal background jobs to stop
+	shutdownCancel()
+
+	// Wait for any running sync to complete (with timeout)
+	syncWaitCtx, syncWaitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer syncWaitCancel()
+
+	// Check periodically if sync has stopped
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+waitLoop:
+	for {
+		select {
+		case <-syncWaitCtx.Done():
+			logger.Warn("Timeout waiting for sync to complete, forcing shutdown...")
+			break waitLoop
+		case <-ticker.C:
+			syncRunningMu.RLock()
+			isRunning := syncRunning
+			syncRunningMu.RUnlock()
+			if !isRunning {
+				logger.Info("Background sync completed, proceeding with shutdown")
+				break waitLoop
+			}
+			logger.Debug("Waiting for background sync to complete...")
+		}
+	}
+
+	// Shutdown HTTP server
+	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer httpShutdownCancel()
+
+	if err := srv.Shutdown(httpShutdownCtx); err != nil {
 		logger.Fatalf("Server forced to shutdown: %v", err)
 	}
 
@@ -554,7 +699,7 @@ func initStorageClient(ctx context.Context) (StorageClient, error) {
 		}
 		if awsAccessKeyID != "" && awsSecretAccessKey != "" {
 			logger.Info("Using AWS Access Key credentials for authentication")
-			logger.Debugf("AWS Access Key ID: %s (length: %d)", maskCredential(awsAccessKeyID), len(awsAccessKeyID))
+			// SECURITY: Do not log any credential information, even masked
 			awsConfig.Credentials = credentials.NewStaticCredentials(
 				awsAccessKeyID,
 				awsSecretAccessKey,
@@ -720,6 +865,52 @@ func boolToFloat(value bool) float64 {
 	return 0
 }
 
+// pruneProcessedObjectsCache removes old entries from the processed objects cache
+// IMPORTANT: Caller must hold processedObjectsMu lock
+func pruneProcessedObjectsCache() {
+	now := time.Now()
+	pruned := 0
+
+	for key, entry := range processedObjects {
+		// Remove entries older than TTL
+		if now.Sub(entry.processedAt) > processedObjectsCacheTTL {
+			delete(processedObjects, key)
+			pruned++
+		}
+	}
+
+	// If still too many entries after TTL pruning, remove oldest entries
+	if len(processedObjects) > maxProcessedObjectsCache {
+		// Find and remove the oldest entries
+		type keyAge struct {
+			key string
+			age time.Duration
+		}
+		var entries []keyAge
+		for key, entry := range processedObjects {
+			entries = append(entries, keyAge{key: key, age: now.Sub(entry.processedAt)})
+		}
+		// Sort by age (oldest first) - simple bubble sort for small sets
+		for i := 0; i < len(entries)-1; i++ {
+			for j := i + 1; j < len(entries); j++ {
+				if entries[i].age < entries[j].age {
+					entries[i], entries[j] = entries[j], entries[i]
+				}
+			}
+		}
+		// Remove oldest entries until under limit
+		toRemove := len(processedObjects) - maxProcessedObjectsCache + (maxProcessedObjectsCache / 10) // Remove extra 10% for headroom
+		for i := 0; i < toRemove && i < len(entries); i++ {
+			delete(processedObjects, entries[i].key)
+			pruned++
+		}
+	}
+
+	if pruned > 0 {
+		logger.Debugf("Pruned %d entries from processed objects cache (current size: %d)", pruned, len(processedObjects))
+	}
+}
+
 func isValidWonderfulEnv(env string) bool {
 	switch env {
 	case "dev", "demo", "sb", "prod":
@@ -733,8 +924,104 @@ func buildWonderfulAPIURL(tenant, env string) string {
 	return fmt.Sprintf("https://%s.api.%s.wonderful.ai", tenant, env)
 }
 
+// validatePresignedURL validates that the pre-signed URL is safe to use
+// It checks that:
+// 1. The URL is well-formed
+// 2. The scheme is HTTPS (secure)
+// 3. The host matches known cloud storage providers
+func validatePresignedURL(rawURL string) error {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL format: %w", err)
+	}
+
+	// Ensure HTTPS scheme
+	if parsedURL.Scheme != "https" {
+		return fmt.Errorf("insecure URL scheme: expected 'https', got '%s'", parsedURL.Scheme)
+	}
+
+	// Validate host against known cloud storage providers
+	host := parsedURL.Host
+	if !presignedURLHostRegex.MatchString(host) {
+		return fmt.Errorf("untrusted host: '%s' does not match known cloud storage providers", host)
+	}
+
+	// Additional checks for suspicious patterns
+	if strings.Contains(rawURL, "..") {
+		return fmt.Errorf("suspicious URL: contains path traversal pattern")
+	}
+
+	return nil
+}
+
+// sanitizeFileName extracts and validates a filename from an object key
+// SECURITY: Prevents path traversal attacks and validates filename characters
+func sanitizeFileName(key string) (string, error) {
+	// Extract base filename
+	fileName := filepath.Base(key)
+
+	// Check for empty filename
+	if fileName == "" || fileName == "." || fileName == ".." {
+		return "", fmt.Errorf("invalid filename: empty or relative path component")
+	}
+
+	// Check for path traversal patterns
+	if strings.Contains(fileName, "..") {
+		return "", fmt.Errorf("path traversal detected in filename")
+	}
+
+	// Check for null bytes (could cause issues in C-based systems)
+	if strings.Contains(fileName, "\x00") {
+		return "", fmt.Errorf("null byte detected in filename")
+	}
+
+	// Check for suspicious characters that shouldn't be in filenames
+	// Allow: alphanumeric, dots, hyphens, underscores, spaces
+	for _, r := range fileName {
+		if !isAllowedFileNameChar(r) {
+			return "", fmt.Errorf("invalid character in filename: %q", r)
+		}
+	}
+
+	// Limit filename length
+	if len(fileName) > 255 {
+		return "", fmt.Errorf("filename too long: %d characters (max 255)", len(fileName))
+	}
+
+	return fileName, nil
+}
+
+// isAllowedFileNameChar checks if a rune is allowed in filenames
+func isAllowedFileNameChar(r rune) bool {
+	// Allow: letters, digits, dots, hyphens, underscores, spaces, and common unicode letters
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	switch r {
+	case '.', '-', '_', ' ', '(', ')', '[', ']':
+		return true
+	}
+	// Allow unicode letters for international filenames
+	if r > 127 {
+		return true
+	}
+	return false
+}
+
+// newTraceID generates a cryptographically secure trace ID
 func newTraceID() string {
-	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63())
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp if crypto/rand fails (should never happen)
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 func doRequestWithRetry(req *http.Request, maxAttempts int, retryableStatus func(int) bool, label string) (*http.Response, error) {
@@ -771,23 +1058,27 @@ func isRetryableStatus(status int) bool {
 
 func sleepWithJitter(attempt int) {
 	backoff := time.Duration(200*attempt) * time.Millisecond
-	jitter := time.Duration(rand.Int63n(200)) * time.Millisecond
+	jitter := time.Duration(mathrand.Int63n(200)) * time.Millisecond
 	time.Sleep(backoff + jitter)
 }
 
 func setupRouter() *gin.Engine {
 	router := gin.Default()
+
+	// Set maximum request body size to prevent DoS
+	router.MaxMultipartMemory = maxRequestBodySize
+
 	router.Use(gin.Logger(), gin.Recovery())
 
-	// Health check (public)
+	// Health check (public) - limited information disclosure
 	router.GET("/health", healthHandler)
 
 	// Metrics endpoint (public - typically restricted by network policy or service mesh)
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// API routes - protected by API key authentication
+	// API routes - protected by API key authentication and rate limiting
 	api := router.Group("/api/v1")
-	api.Use(apiKeyAuthMiddleware())
+	api.Use(rateLimitMiddleware(), apiKeyAuthMiddleware())
 	{
 		api.POST("/sync", triggerSync)
 		api.GET("/stats", getStats)
@@ -798,25 +1089,27 @@ func setupRouter() *gin.Engine {
 }
 
 // apiKeyAuthMiddleware validates API key for internal endpoints
+// SECURITY: This middleware implements fail-closed authentication
 func apiKeyAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// If INTERNAL_API_KEY is not set, log warning but allow access (backward compatibility)
+		// SECURITY: Fail-closed - if INTERNAL_API_KEY is not set, deny access
 		if internalAPIKey == "" {
-			logger.Warn("INTERNAL_API_KEY not set - API endpoints are not protected. This is a security risk.")
-			c.Next()
+			logger.Error("INTERNAL_API_KEY not set - denying access to protected endpoint (fail-closed security)")
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "Service not properly configured. API authentication is required but not configured.",
+			})
+			c.Abort()
 			return
 		}
 
-		// Check for API key in header (x-api-key) or query parameter (api_key)
+		// SECURITY: Only accept API key via header, not query parameter
+		// Query parameters are logged in access logs and visible in browser history
 		providedKey := c.GetHeader("x-api-key")
-		if providedKey == "" {
-			providedKey = c.Query("api_key")
-		}
 
 		if providedKey == "" {
-			logger.Warn("API request without authentication attempted")
+			logger.Warnf("API request without authentication attempted from %s", c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "Missing API key. Provide x-api-key header or api_key query parameter.",
+				"error": "Missing API key. Provide 'x-api-key' header.",
 			})
 			c.Abort()
 			return
@@ -836,31 +1129,93 @@ func apiKeyAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-// secureCompare performs constant-time string comparison
+// rateLimitMiddleware implements basic rate limiting for API endpoints
+func rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		clientIP := c.ClientIP()
+		now := time.Now()
+		windowStart := now.Add(-time.Minute)
+
+		apiRequestCountsMu.Lock()
+
+		// Clean up old entries
+		if times, exists := apiRequestCounts[clientIP]; exists {
+			var validTimes []time.Time
+			for _, t := range times {
+				if t.After(windowStart) {
+					validTimes = append(validTimes, t)
+				}
+			}
+			apiRequestCounts[clientIP] = validTimes
+		}
+
+		// Check rate limit
+		currentCount := len(apiRequestCounts[clientIP])
+		if currentCount >= apiRateLimitPerMinute {
+			apiRequestCountsMu.Unlock()
+			logger.Warnf("Rate limit exceeded for client %s: %d requests in last minute", clientIP, currentCount)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":       "Rate limit exceeded",
+				"retry_after": "60",
+			})
+			c.Abort()
+			return
+		}
+
+		// Record this request
+		apiRequestCounts[clientIP] = append(apiRequestCounts[clientIP], now)
+		apiRequestCountsMu.Unlock()
+
+		c.Next()
+	}
+}
+
+// secureCompare performs constant-time string comparison using crypto/subtle
+// to prevent timing attacks. This is the recommended approach for comparing secrets.
 func secureCompare(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	result := 0
-	for i := 0; i < len(a); i++ {
-		result |= int(a[i]) ^ int(b[i])
-	}
-	return result == 0
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func healthHandler(c *gin.Context) {
+	// SECURITY: Limit information disclosed in health endpoint
+	// Detailed config info should only be exposed to authenticated users
 	c.JSON(http.StatusOK, gin.H{
-		"status":            "healthy",
-		"service":           "wonderful-rag-sync",
-		"storage_provider":  storageProvider,
-		"storage_location":  storageLocation,
-		"storage_prefix":    storagePrefix,
-		"wonderful_api_url": wonderfulAPIURL,
+		"status":  "healthy",
+		"service": "wonderful-rag-sync",
 	})
 }
 
 func triggerSync(c *gin.Context) {
-	go syncStorageToWonderful()
+	// Check if sync is already running
+	syncRunningMu.RLock()
+	isRunning := syncRunning
+	syncRunningMu.RUnlock()
+
+	if isRunning {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "Sync already in progress",
+			"status":  "running",
+			"message": "Please wait for the current sync to complete before triggering another",
+		})
+		return
+	}
+
+	// Try to acquire the sync lock
+	if !syncMu.TryLock() {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "Sync already in progress",
+			"status":  "running",
+			"message": "Another sync operation is starting",
+		})
+		return
+	}
+
+	// Start sync in background
+	go func() {
+		defer syncMu.Unlock()
+		syncStorageToWonderful()
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Sync triggered",
 		"status":  "started",
@@ -896,6 +1251,16 @@ func getProcessedFiles(c *gin.Context) {
 }
 
 func syncStorageToWonderful() {
+	// Mark sync as running
+	syncRunningMu.Lock()
+	syncRunning = true
+	syncRunningMu.Unlock()
+	defer func() {
+		syncRunningMu.Lock()
+		syncRunning = false
+		syncRunningMu.Unlock()
+	}()
+
 	logger.Info("=== Starting Storage to Wonderful API Sync ===")
 	syncStartTime := time.Now()
 	providerLabel := storageProvider
@@ -903,7 +1268,9 @@ func syncStorageToWonderful() {
 	syncInProgress.WithLabelValues(providerLabel).Set(1)
 	defer syncInProgress.WithLabelValues(providerLabel).Set(0)
 
-	ctx := context.Background()
+	// Use shutdown context for graceful cancellation
+	ctx, cancel := context.WithCancel(shutdownCtx)
+	defer cancel()
 	logger.Debugf("Preparing to list objects from %s (%s)", storageProvider, storageLocation)
 
 	objects, err := storageClient.ListObjects(ctx)
@@ -965,9 +1332,14 @@ func syncStorageToWonderful() {
 		logger.Debugf("  ✓ Downloaded %d bytes in %v", len(fileContent), downloadDuration)
 
 		// Upload to Wonderful API
-		fileName := key
-		if lastSlash := strings.LastIndex(key, "/"); lastSlash >= 0 {
-			fileName = key[lastSlash+1:]
+		// SECURITY: Extract and sanitize filename to prevent path traversal
+		fileName, err := sanitizeFileName(key)
+		if err != nil {
+			logger.Errorf("  ✗ Invalid filename in key %s: %v", key, err)
+			errorCount++
+			errors = append(errors, fmt.Sprintf("%s: invalid filename - %v", key, err))
+			filesFailedTotal.WithLabelValues(providerLabel).Inc()
+			continue
 		}
 
 		logger.Infof("  → Starting upload and attach process for: %s", key)
@@ -1002,8 +1374,13 @@ func syncStorageToWonderful() {
 		} else {
 			logger.Infof("  ↪ Moved processed file to %s", archiveKey)
 		}
+		// Track processed object with timestamp for TTL-based pruning
 		processedObjectsMu.Lock()
-		processedObjects[key] = true
+		processedObjects[key] = processedObjectEntry{processedAt: time.Now()}
+		// Prune old entries if cache is getting too large
+		if len(processedObjects) > maxProcessedObjectsCache {
+			pruneProcessedObjectsCache()
+		}
 		processedObjectsMu.Unlock()
 
 		logger.Infof("  ✓ Successfully processed %s (uploaded and attached to RAG, file ID: %s, took %v)", key, fileID, uploadDuration)
@@ -1070,7 +1447,7 @@ func uploadToWonderful(ctx context.Context, fileName string, fileContent []byte,
 		return "", fmt.Errorf("failed to marshal storage request: %w", err)
 	}
 
-	logger.Debugf("    ✓ Storage request payload: %s", string(storageBody))
+	logger.Debugf("    ✓ Storage request prepared for file: %s", fileName)
 
 	// Try POST method first (as per API spec)
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -1127,6 +1504,12 @@ func uploadToWonderful(ctx context.Context, fileName string, fileContent []byte,
 	if !ok || presignedURL == "" {
 		logger.Errorf("    ✗ No 'url' in data object: %s", string(respBody))
 		return "", fmt.Errorf("no 'url' in storage response data")
+	}
+
+	// SECURITY: Validate the pre-signed URL before using it
+	if err := validatePresignedURL(presignedURL); err != nil {
+		logger.Errorf("    ✗ Pre-signed URL validation failed: %v", err)
+		return "", fmt.Errorf("pre-signed URL validation failed: %w", err)
 	}
 
 	// Get file ID from data.id
@@ -1197,7 +1580,7 @@ func uploadToWonderful(ctx context.Context, fileName string, fileContent []byte,
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	logger.Debugf("    ✓ JSON request body: %s", string(jsonBody))
+	logger.Debugf("    ✓ Attachment request prepared for file_id: %s", fileID)
 
 	// Create attachment request
 	attachCtx, attachCancel := context.WithTimeout(ctx, 15*time.Second)
@@ -1254,20 +1637,6 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func formatFileSize(bytes int64) string {

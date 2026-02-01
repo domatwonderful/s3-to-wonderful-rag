@@ -27,15 +27,23 @@ ARG TARGETARCH=amd64
 # No -v (verbose), no -a (rebuild all), no -installsuffix (not needed with CGO_ENABLED=0)
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o wonderful-rag-sync ./cmd/s3-to-wonderful-rag
 
-# Final stage
-FROM alpine:latest
+# Final stage - use pinned version for reproducible builds
+FROM alpine:3.21
 
-RUN apk --no-cache add ca-certificates tzdata
+# Install dependencies and create non-root user
+RUN apk --no-cache add ca-certificates tzdata && \
+    adduser -D -u 10001 -g "" appuser
 
 WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /build/wonderful-rag-sync .
+
+# Ensure binary is owned by appuser and executable
+RUN chown appuser:appuser /app/wonderful-rag-sync
+
+# Switch to non-root user
+USER appuser
 
 # Expose port
 EXPOSE 8080

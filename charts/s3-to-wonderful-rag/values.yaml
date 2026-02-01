@@ -82,6 +82,23 @@ extraVolumeMounts:
   - name: tmp
     mountPath: /tmp
 
+# Node scheduling configuration
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Topology spread constraints for high availability
+topologySpreadConstraints: []
+# Example:
+# - maxSkew: 1
+#   topologyKey: topology.kubernetes.io/zone
+#   whenUnsatisfiable: ScheduleAnyway
+#   labelSelector:
+#     matchLabels:
+#       app.kubernetes.io/name: s3-to-wonderful-rag
+
 env:
   storageProvider: s3
   awsRegion: us-east-1
@@ -98,9 +115,6 @@ env:
   syncIntervalMinutes: ""
   maxFileSizeMb: "0"
   port: "8080"
-  # Optional: Set this to secure internal API endpoints (/api/v1/sync, /api/v1/stats, etc.)
-  # Leave empty to disable authentication (not recommended for production)
-  internalApiKey: ""
 
 secrets:
   # SECURITY BEST PRACTICE: Use existingSecret with external secret management
@@ -119,4 +133,6 @@ secrets:
   azureStorageConnectionString: ""
   wonderfulRagId: ""
   wonderfulApiKey: ""
+  # REQUIRED for production: API key for internal endpoints (/api/v1/sync, /api/v1/stats, etc.)
+  # Without this, the service will deny access to these endpoints (fail-closed security)
   internalApiKey: ""
