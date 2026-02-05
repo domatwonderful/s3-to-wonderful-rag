@@ -26,11 +26,10 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -212,8 +211,8 @@ type StorageClient interface {
 type S3Storage struct {
 	bucket     string
 	prefix     string
-	client     *s3.S3
-	downloader *s3manager.Downloader
+	client     *s3.Client
+	downloader *manager.Downloader
 }
 
 func (s *S3Storage) Provider() string { return "s3" }
@@ -221,17 +220,22 @@ func (s *S3Storage) Location() string { return s.bucket }
 func (s *S3Storage) Prefix() string   { return s.prefix }
 
 func (s *S3Storage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
-	listInput := &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
+	input := &s3.ListObjectsV2Input{
+		Bucket: &s.bucket,
 	}
 	if s.prefix != "" {
-		listInput.Prefix = aws.String(s.prefix)
+		input.Prefix = &s.prefix
 	}
 
-	objects := []ObjectInfo{}
-	err := s.client.ListObjectsV2PagesWithContext(ctx, listInput, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+	var objects []ObjectInfo
+	paginator := s3.NewListObjectsV2Paginator(s.client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list objects from S3 bucket %s: %w", s.bucket, err)
+		}
 		for _, obj := range page.Contents {
-			if obj == nil || obj.Key == nil || obj.Size == nil {
+			if obj.Key == nil {
 				continue
 			}
 			lastModified := time.Time{}
@@ -244,19 +248,15 @@ func (s *S3Storage) ListObjects(ctx context.Context) ([]ObjectInfo, error) {
 				LastModified: lastModified,
 			})
 		}
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list objects from S3 bucket %s: %w", s.bucket, err)
 	}
 	return objects, nil
 }
 
 func (s *S3Storage) DownloadObject(ctx context.Context, key string) ([]byte, error) {
-	buf := aws.NewWriteAtBuffer([]byte{})
-	_, err := s.downloader.DownloadWithContext(ctx, buf, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+	buf := manager.NewWriteAtBuffer([]byte{})
+	_, err := s.downloader.Download(ctx, buf, &s3.GetObjectInput{
+		Bucket: &s.bucket,
+		Key:    &key,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download object %s from S3 bucket %s: %w", key, s.bucket, err)
@@ -268,17 +268,18 @@ func (s *S3Storage) MoveObject(ctx context.Context, srcKey, destKey string) erro
 	if srcKey == destKey {
 		return nil
 	}
-	_, err := s.client.CopyObjectWithContext(ctx, &s3.CopyObjectInput{
-		Bucket:     aws.String(s.bucket),
-		Key:        aws.String(destKey),
-		CopySource: aws.String(url.PathEscape(s.bucket + "/" + srcKey)),
+	copySource := url.PathEscape(s.bucket + "/" + srcKey)
+	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     &s.bucket,
+		Key:        &destKey,
+		CopySource: &copySource,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = s.client.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(srcKey),
+	_, err = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &s.bucket,
+		Key:    &srcKey,
 	})
 	return err
 }
@@ -694,28 +695,26 @@ func initStorageClient(ctx context.Context) (StorageClient, error) {
 			return nil, fmt.Errorf("S3_BUCKET is required for s3 provider")
 		}
 
-		awsConfig := &aws.Config{
-			Region: aws.String(awsRegion),
-		}
+		var opts []func(*awsconfig.LoadOptions) error
+		opts = append(opts, awsconfig.WithRegion(awsRegion))
+
 		if awsAccessKeyID != "" && awsSecretAccessKey != "" {
 			logger.Info("Using AWS Access Key credentials for authentication")
 			// SECURITY: Do not log any credential information, even masked
-			awsConfig.Credentials = credentials.NewStaticCredentials(
-				awsAccessKeyID,
-				awsSecretAccessKey,
-				"",
-			)
+			opts = append(opts, awsconfig.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(awsAccessKeyID, awsSecretAccessKey, ""),
+			))
 		} else {
 			logger.Info("No AWS credentials provided, using IAM role or default credentials chain")
 		}
 
-		awsSession, err := session.NewSession(awsConfig)
+		cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create AWS session: %w", err)
+			return nil, fmt.Errorf("failed to load AWS config: %w", err)
 		}
 
-		s3Client := s3.New(awsSession)
-		downloader := s3manager.NewDownloader(awsSession)
+		s3Client := s3.NewFromConfig(cfg)
+		downloader := manager.NewDownloader(s3Client)
 		storage := &S3Storage{
 			bucket:     bucket,
 			prefix:     prefix,
@@ -724,7 +723,7 @@ func initStorageClient(ctx context.Context) (StorageClient, error) {
 		}
 
 		// Test S3 connection
-		if _, err := s3Client.HeadBucket(&s3.HeadBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		if _, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: &bucket}); err != nil {
 			logger.Warnf("S3 bucket head check failed (may be expected): %v", err)
 		} else {
 			logger.Infof("✓ Successfully connected to S3 bucket: %s", bucket)
